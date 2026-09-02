@@ -6,7 +6,9 @@ from testcontainers.kafka import KafkaContainer
 
 @pytest.fixture(scope="session")
 def kafka_container():
-    with KafkaContainer("apache/kafka:latest") as container:
+    # Using confluentinc/cp-kafka because apache/kafka:latest uses KRaft mode
+    # which is not fully supported by testcontainers' wait strategy
+    with KafkaContainer("confluentinc/cp-kafka:7.5.0") as container:
         yield container
 
 
