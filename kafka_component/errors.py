@@ -25,3 +25,21 @@ class SkipAndLogPolicy:
             getattr(message, "offset", None),
             exc,
         )
+
+
+class DeadLetterPolicy:
+    def __init__(self, producer: Sender, dlq_topic: str | None = None) -> None:
+        self._producer = producer
+        self._dlq_topic = dlq_topic
+
+    async def handle(self, message: Any, exc: Exception) -> None:
+        topic = self._dlq_topic or f"{message.topic}.DLQ"
+        payload = {
+            "original_topic": message.topic,
+            "original_partition": message.partition,
+            "original_offset": message.offset,
+            "original_value": message.value,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
+        await self._producer.send(topic, payload)
