@@ -1,0 +1,31 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "PyPI target"
+        required: true
+        default: "pypi"
+        type: choice
+        options: ["pypi", "testpypi"]
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target || 'pypi' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ (github.event.inputs.target == 'testpypi') && 'https://test.pypi.org/legacy/' || '' }}
