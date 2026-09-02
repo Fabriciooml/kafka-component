@@ -1,0 +1,6 @@
+.superpowers/
+*.egg-info/
+__pycache__/
+.venv/
+dist/
+uv.lock
