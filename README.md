@@ -16,6 +16,8 @@ uv add kafka-component
 ## Usage
 
 ```python
+import asyncio
+
 from python_components import System
 from kafka_component import KafkaProducerComponent, KafkaConsumerComponent, DeadLetterPolicy
 
@@ -30,13 +32,22 @@ consumer = KafkaConsumerComponent(
     topics=["orders"],
     handler=handle_order,
     error_policy=DeadLetterPolicy(producer, dlq_topic="orders.DLQ"),
-)
+).using(["producer"])
 
 system = System({"producer": producer, "consumer": consumer})
 
-async with system:
-    await producer.send("orders", {"order_id": 1})
+async def main():
+    async with system:
+        await producer.send("orders", {"order_id": 1})
+
+asyncio.run(main())
 ```
+
+The consumer's `.using(["producer"])` declares a start-order dependency on the
+producer so `System`'s topological sort always starts the producer first —
+it is not read as an injected `self.producer` attribute by
+`KafkaConsumerComponent`; the `DeadLetterPolicy` above already holds a
+direct reference to the `producer` instance.
 
 ## Semantics and caveats
 

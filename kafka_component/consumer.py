@@ -64,21 +64,33 @@ class KafkaConsumerComponent(Component):
         assert self._consumer is not None
         while not self._stopping.is_set():
             try:
-                msg = await asyncio.wait_for(self._consumer.getone(), timeout=1.0)
-            except TimeoutError:
-                continue
-
-            try:
-                await self._handler(msg.value)
-            except Exception as exc:
-                self._last_error = str(exc)
                 try:
-                    await self._error_policy.handle(msg, exc)
-                except Exception as policy_exc:
-                    self._last_error = str(policy_exc)
+                    msg = await asyncio.wait_for(self._consumer.getone(), timeout=1.0)
+                except TimeoutError:
                     continue
 
-            await self._consumer.commit()
+                try:
+                    await self._handler(msg.value)
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    try:
+                        await self._error_policy.handle(msg, exc)
+                    except Exception as policy_exc:
+                        self._last_error = str(policy_exc)
+                        continue
+
+                await self._consumer.commit()
+            except Exception as exc:
+                # Anything not already handled above (a deserialization
+                # failure surfacing from getone() itself, or a commit()
+                # failure) would otherwise kill this task permanently while
+                # get_status() kept reporting connected=True. Mark the loop
+                # as dead and return normally so shutdown()'s
+                # `await self._consume_task` doesn't re-raise and skip
+                # `self._consumer.stop()`.
+                self._last_error = str(exc)
+                self._started = False
+                break
 
     def routes(self) -> APIRouter:
         return build_health_router(self.get_status)

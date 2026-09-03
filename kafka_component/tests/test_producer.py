@@ -31,6 +31,21 @@ async def test_get_status_reflects_lifecycle(bootstrap_servers):
     assert component.get_status()["connected"] is False
 
 
+async def test_send_with_bytes_key_round_trips(bootstrap_servers):
+    component = KafkaProducerComponent(bootstrap_servers=bootstrap_servers)
+    await component.start()
+    try:
+        await component.send("producer-key-topic", {"order_id": 42}, key=b"order-42")
+    finally:
+        await component.shutdown()
+
+    msg = await raw_consume_one(
+        bootstrap_servers, "producer-key-topic", group_id="producer-key-test-group"
+    )
+    assert msg.key == b"order-42"
+    assert msg.value == {"order_id": 42}
+
+
 async def test_send_before_start_raises(bootstrap_servers):
     component = KafkaProducerComponent(bootstrap_servers=bootstrap_servers)
     try:

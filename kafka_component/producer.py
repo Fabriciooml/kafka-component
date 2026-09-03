@@ -39,9 +39,7 @@ class KafkaProducerComponent(Component):
             await self._producer.stop()
         self._started = False
 
-    async def send(
-        self, topic: str, value: Any, *, key: bytes | str | None = None
-    ) -> None:
+    async def send(self, topic: str, value: Any, *, key: bytes | None = None) -> None:
         if self._producer is None:
             raise RuntimeError("KafkaProducerComponent.send() called before start()")
         try:

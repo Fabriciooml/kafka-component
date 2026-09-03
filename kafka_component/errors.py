@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class Sender(Protocol):
     async def send(
-        self, topic: str, value: Any, *, key: bytes | str | None = None
+        self, topic: str, value: Any, *, key: bytes | None = None
     ) -> None: ...
 
 
