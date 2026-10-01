@@ -6,12 +6,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from aiokafka import AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener
 from fastapi import APIRouter
 from python_components import Component
 
 from kafka_component._routes import build_health_router
-from kafka_component.errors import ErrorPolicy, SkipAndLogPolicy
+from kafka_component.errors import (
+    ErrorPolicy,
+    SkipAndLogPolicy,
+    StartOffsetOutOfRangeError,
+)
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,47 @@ class PartitionAssignment:
     partition: int
     beginning_offset: int
     end_offset: int
+
+
+class _ResolverRebalanceListener(ConsumerRebalanceListener):
+    def __init__(
+        self,
+        consumer: AIOKafkaConsumer,
+        resolver: Callable[[PartitionAssignment], Awaitable[int]],
+        on_error: Callable[[Exception], None],
+    ) -> None:
+        self._consumer = consumer
+        self._resolver = resolver
+        self._on_error = on_error
+
+    async def on_partitions_revoked(self, revoked: Any) -> None:
+        pass
+
+    async def on_partitions_assigned(self, assigned: Any) -> None:
+        for tp in assigned:
+            committed = await self._consumer.committed(tp)
+            if committed is not None:
+                continue
+            beginning = (await self._consumer.beginning_offsets([tp]))[tp]
+            end = (await self._consumer.end_offsets([tp]))[tp]
+            assignment = PartitionAssignment(
+                topic=tp.topic,
+                partition=tp.partition,
+                beginning_offset=beginning,
+                end_offset=end,
+            )
+            target = await self._resolver(assignment)
+            if not beginning <= target <= end:
+                exc = StartOffsetOutOfRangeError(
+                    topic=tp.topic,
+                    partition=tp.partition,
+                    requested_offset=target,
+                    beginning_offset=beginning,
+                    end_offset=end,
+                )
+                self._on_error(exc)
+                raise exc
+            self._consumer.seek(tp, target)
 
 
 class KafkaConsumerComponent(Component):
@@ -68,9 +113,11 @@ class KafkaConsumerComponent(Component):
         self._last_error: str | None = None
         self._consume_task: asyncio.Task[None] | None = None
         self._stopping: asyncio.Event = asyncio.Event()
+        self._resolver_error: Exception | None = None
 
     async def start(self) -> None:
         self._stopping = asyncio.Event()
+        self._resolver_error = None
         self._consumer = AIOKafkaConsumer(
             bootstrap_servers=self._bootstrap_servers,
             group_id=self._group_id,
@@ -83,7 +130,14 @@ class KafkaConsumerComponent(Component):
                 else None
             ),
         )
-        self._consumer.subscribe(topics=self._topics, listener=None)
+        listener = (
+            _ResolverRebalanceListener(
+                self._consumer, self._start_offset_resolver, self._record_resolver_error
+            )
+            if self._start_offset_resolver is not None
+            else None
+        )
+        self._consumer.subscribe(topics=self._topics, listener=listener)
         await self._consumer.start()
         self._started = True
         self._consume_task = asyncio.create_task(self._consume_loop())
@@ -96,10 +150,16 @@ class KafkaConsumerComponent(Component):
             await self._consumer.stop()
         self._started = False
 
+    def _record_resolver_error(self, exc: Exception) -> None:
+        self._resolver_error = exc
+
     async def _consume_loop(self) -> None:
         assert self._consumer is not None
         while not self._stopping.is_set():
             try:
+                if self._resolver_error is not None:
+                    raise self._resolver_error
+
                 try:
                     msg = await asyncio.wait_for(self._consumer.getone(), timeout=1.0)
                 except TimeoutError:

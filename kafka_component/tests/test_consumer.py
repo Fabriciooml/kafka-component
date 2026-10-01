@@ -6,7 +6,11 @@ from typing import Any
 
 from aiokafka import AIOKafkaProducer
 
-from kafka_component.consumer import KafkaConsumerComponent, KafkaRecord
+from kafka_component.consumer import (
+    KafkaConsumerComponent,
+    KafkaRecord,
+    PartitionAssignment,
+)
 from kafka_component.errors import DeadLetterPolicy
 from kafka_component.producer import KafkaProducerComponent
 from kafka_component.tests.helpers import raw_consume_one, raw_produce
@@ -341,3 +345,123 @@ async def test_record_handler_sees_raw_bytes_for_malformed_json(bootstrap_server
     assert seen[0].offset == 0
     assert seen[0].value == b"not valid json"
     assert len(decode_errors) == 1
+
+
+async def test_resolver_selects_saved_offset_and_skips_earlier_records(
+    bootstrap_servers,
+):
+    topic = "resolver-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+    await raw_produce(bootstrap_servers, topic, {"seq": 2})
+    await raw_produce(bootstrap_servers, topic, {"seq": 3})
+
+    received: list[KafkaRecord] = []
+
+    async def record_handler(record: KafkaRecord) -> None:
+        received.append(record)
+
+    async def resolver(assignment: PartitionAssignment) -> int:
+        assert assignment.topic == topic
+        assert assignment.partition == 0
+        return assignment.end_offset - 1  # skip the first two records
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-group",
+        topics=[topic],
+        record_handler=record_handler,
+        start_offset_resolver=resolver,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(received) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert len(received) == 1
+    assert json.loads(received[0].value) == {"seq": 3}
+
+
+async def test_resolver_offset_includes_records_produced_before_startup(
+    bootstrap_servers,
+):
+    from aiokafka import AIOKafkaConsumer, TopicPartition
+
+    topic = "resolver-late-produce-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+
+    # Simulate "route created, boundary captured" — the application would do
+    # this itself (e.g. an admin client's end_offsets call) at route-creation
+    # time, well before this component's consumer ever starts.
+    probe = AIOKafkaConsumer(bootstrap_servers=bootstrap_servers)
+    await probe.start()
+    try:
+        tp = TopicPartition(topic, 0)
+        boundary = (await probe.end_offsets([tp]))[tp]
+    finally:
+        await probe.stop()
+
+    # More records arrive after the boundary was captured but before this
+    # component's consumer starts — they must still be handled.
+    await raw_produce(bootstrap_servers, topic, {"seq": 2})
+
+    async def fixed_resolver(assignment: PartitionAssignment) -> int:
+        return boundary
+
+    received: list[KafkaRecord] = []
+
+    async def record_handler(record: KafkaRecord) -> None:
+        received.append(record)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-late-produce-group",
+        topics=[topic],
+        record_handler=record_handler,
+        start_offset_resolver=fixed_resolver,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(received) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert len(received) == 1
+    assert json.loads(received[0].value) == {"seq": 2}
+
+
+async def test_out_of_range_resolver_offset_is_fatal(bootstrap_servers):
+    topic = "resolver-out-of-range-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+
+    async def record_handler(record: KafkaRecord) -> None:
+        pass
+
+    async def bad_resolver(assignment: PartitionAssignment) -> int:
+        return assignment.end_offset + 1000
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-out-of-range-group",
+        topics=[topic],
+        record_handler=record_handler,
+        start_offset_resolver=bad_resolver,
+    )
+    await component.start()
+
+    for _ in range(50):
+        if component.get_status()["connected"] is False:
+            break
+        await asyncio.sleep(0.2)
+
+    status = component.get_status()
+    assert status["connected"] is False
+    assert status["last_error"] is not None
+
+    await asyncio.wait_for(component.shutdown(), timeout=5.0)
