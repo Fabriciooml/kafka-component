@@ -465,3 +465,133 @@ async def test_out_of_range_resolver_offset_is_fatal(bootstrap_servers):
     assert status["last_error"] is not None
 
     await asyncio.wait_for(component.shutdown(), timeout=5.0)
+
+
+async def test_restart_resumes_from_committed_offset_without_invoking_resolver(
+    bootstrap_servers,
+):
+    topic = "resolver-restart-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+
+    resolver_calls: list[PartitionAssignment] = []
+
+    async def resolver(assignment: PartitionAssignment) -> int:
+        resolver_calls.append(assignment)
+        return assignment.beginning_offset
+
+    first_received: list[KafkaRecord] = []
+
+    async def first_handler(record: KafkaRecord) -> None:
+        first_received.append(record)
+
+    first = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-restart-group",
+        topics=[topic],
+        record_handler=first_handler,
+        start_offset_resolver=resolver,
+    )
+    await first.start()
+    try:
+        for _ in range(50):
+            if len(first_received) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await first.shutdown()
+
+    assert len(first_received) == 1
+    assert len(resolver_calls) == 1
+
+    await raw_produce(bootstrap_servers, topic, {"seq": 2})
+
+    second_received: list[KafkaRecord] = []
+
+    async def second_handler(record: KafkaRecord) -> None:
+        second_received.append(record)
+
+    second = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-restart-group",
+        topics=[topic],
+        record_handler=second_handler,
+        start_offset_resolver=resolver,
+    )
+    await second.start()
+    try:
+        for _ in range(50):
+            if len(second_received) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await second.shutdown()
+
+    assert len(second_received) == 1
+    assert json.loads(second_received[0].value) == {"seq": 2}
+    assert len(resolver_calls) == 1  # not invoked again: committed offset exists
+
+
+async def test_rebalance_new_partition_invokes_resolver_existing_partition_does_not(
+    bootstrap_servers,
+):
+    from aiokafka.admin import AIOKafkaAdminClient, NewPartitions, NewTopic
+
+    topic = "resolver-rebalance-topic"
+    admin = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+    await admin.start()
+    try:
+        await admin.create_topics(
+            [NewTopic(name=topic, num_partitions=1, replication_factor=1)]
+        )
+    finally:
+        await admin.close()
+
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+
+    resolver_calls: list[PartitionAssignment] = []
+    received: list[KafkaRecord] = []
+
+    async def resolver(assignment: PartitionAssignment) -> int:
+        resolver_calls.append(assignment)
+        return assignment.beginning_offset
+
+    async def record_handler(record: KafkaRecord) -> None:
+        received.append(record)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-rebalance-group",
+        topics=[topic],
+        record_handler=record_handler,
+        start_offset_resolver=resolver,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(received) == 1:
+                break
+            await asyncio.sleep(0.2)
+        assert len(resolver_calls) == 1
+        assert resolver_calls[0].partition == 0
+
+        admin2 = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+        await admin2.start()
+        try:
+            await admin2.create_partitions({topic: NewPartitions(total_count=2)})
+        finally:
+            await admin2.close()
+
+        await component._consumer._client.force_metadata_update()
+
+        await raw_produce(bootstrap_servers, topic, {"seq": 2})
+
+        for _ in range(50):
+            if len(resolver_calls) == 2:
+                break
+            await asyncio.sleep(0.5)
+    finally:
+        await component.shutdown()
+
+    assert len(resolver_calls) == 2
+    partitions_seen = sorted(call.partition for call in resolver_calls)
+    assert partitions_seen == [0, 1]
