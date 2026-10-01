@@ -72,14 +72,14 @@ class KafkaConsumerComponent(Component):
     async def start(self) -> None:
         self._stopping = asyncio.Event()
         self._consumer = AIOKafkaConsumer(
-            *self._topics,
             bootstrap_servers=self._bootstrap_servers,
             group_id=self._group_id,
             client_id=self._client_id,
-            auto_offset_reset="earliest",
+            auto_offset_reset=self._auto_offset_reset,
             enable_auto_commit=False,
             value_deserializer=lambda v: json.loads(v.decode("utf-8")),
         )
+        self._consumer.subscribe(topics=self._topics, listener=None)
         await self._consumer.start()
         self._started = True
         self._consume_task = asyncio.create_task(self._consume_loop())
