@@ -595,3 +595,33 @@ async def test_rebalance_new_partition_invokes_resolver_existing_partition_does_
     assert len(resolver_calls) == 2
     partitions_seen = sorted(call.partition for call in resolver_calls)
     assert partitions_seen == [0, 1]
+
+
+async def test_auto_offset_reset_latest_skips_preexisting_records(bootstrap_servers):
+    topic = "auto-offset-reset-latest-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1})
+
+    received: list[Any] = []
+
+    async def handler(value: Any) -> None:
+        received.append(value)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="auto-offset-reset-latest-group",
+        topics=[topic],
+        handler=handler,
+        auto_offset_reset="latest",
+    )
+    await component.start()
+    try:
+        await asyncio.sleep(2.0)  # let the consumer join the group and set its position
+        await raw_produce(bootstrap_servers, topic, {"seq": 2})
+        for _ in range(50):
+            if len(received) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert received == [{"seq": 2}]
