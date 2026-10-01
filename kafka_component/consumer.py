@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from aiokafka import AIOKafkaConsumer
 from fastapi import APIRouter
@@ -40,15 +40,27 @@ class KafkaConsumerComponent(Component):
         bootstrap_servers: str | list[str],
         group_id: str,
         topics: list[str],
-        handler: Callable[[Any], Awaitable[None]],
+        handler: Callable[[Any], Awaitable[None]] | None = None,
+        record_handler: Callable[[KafkaRecord], Awaitable[None]] | None = None,
+        start_offset_resolver: Callable[[PartitionAssignment], Awaitable[int]]
+        | None = None,
+        auto_offset_reset: Literal["earliest", "latest", "none"] = "earliest",
         error_policy: ErrorPolicy | None = None,
         client_id: str | None = None,
     ) -> None:
+        if (handler is None) == (record_handler is None):
+            raise ValueError(
+                "KafkaConsumerComponent requires exactly one of `handler` or "
+                "`record_handler`"
+            )
         self.using([])
         self._bootstrap_servers = bootstrap_servers
         self._group_id = group_id
         self._topics = topics
         self._handler = handler
+        self._record_handler = record_handler
+        self._start_offset_resolver = start_offset_resolver
+        self._auto_offset_reset = auto_offset_reset
         self._error_policy: ErrorPolicy = error_policy or SkipAndLogPolicy()
         self._client_id = client_id
         self._consumer: AIOKafkaConsumer | None = None
