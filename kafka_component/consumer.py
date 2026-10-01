@@ -77,7 +77,11 @@ class KafkaConsumerComponent(Component):
             client_id=self._client_id,
             auto_offset_reset=self._auto_offset_reset,
             enable_auto_commit=False,
-            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            value_deserializer=(
+                (lambda v: json.loads(v.decode("utf-8")))
+                if self._handler is not None
+                else None
+            ),
         )
         self._consumer.subscribe(topics=self._topics, listener=None)
         await self._consumer.start()
@@ -102,7 +106,20 @@ class KafkaConsumerComponent(Component):
                     continue
 
                 try:
-                    await self._handler(msg.value)
+                    if self._record_handler is not None:
+                        record = KafkaRecord(
+                            topic=msg.topic,
+                            partition=msg.partition,
+                            offset=msg.offset,
+                            value=msg.value,
+                            key=msg.key,
+                            timestamp=msg.timestamp,
+                            headers=tuple(msg.headers),
+                        )
+                        await self._record_handler(record)
+                    else:
+                        assert self._handler is not None
+                        await self._handler(msg.value)
                 except Exception as exc:
                     self._last_error = str(exc)
                     try:

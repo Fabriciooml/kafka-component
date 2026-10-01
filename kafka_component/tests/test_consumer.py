@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from aiokafka import AIOKafkaProducer
 
-from kafka_component.consumer import KafkaConsumerComponent
+from kafka_component.consumer import KafkaConsumerComponent, KafkaRecord
 from kafka_component.errors import DeadLetterPolicy
 from kafka_component.producer import KafkaProducerComponent
 from kafka_component.tests.helpers import raw_consume_one, raw_produce
@@ -202,3 +203,141 @@ async def test_deserialization_failure_marks_disconnected_and_shutdown_does_not_
     assert status["last_error"] is not None
 
     await asyncio.wait_for(component.shutdown(), timeout=5.0)
+
+
+async def test_record_handler_receives_coordinates_across_partitions(bootstrap_servers):
+    from aiokafka.admin import AIOKafkaAdminClient, NewTopic
+
+    topic = "record-handler-topic"
+    admin = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+    await admin.start()
+    try:
+        await admin.create_topics(
+            [NewTopic(name=topic, num_partitions=2, replication_factor=1)]
+        )
+    finally:
+        await admin.close()
+
+    raw_producer = AIOKafkaProducer(
+        bootstrap_servers=bootstrap_servers,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    )
+    await raw_producer.start()
+    try:
+        await raw_producer.send_and_wait(topic, value={"seq": 1}, partition=0)
+        await raw_producer.send_and_wait(topic, value={"seq": 2}, partition=1)
+    finally:
+        await raw_producer.stop()
+
+    received: list[KafkaRecord] = []
+
+    async def record_handler(record: KafkaRecord) -> None:
+        received.append(record)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="record-handler-group",
+        topics=[topic],
+        record_handler=record_handler,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(received) == 2:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert len(received) == 2
+    by_partition = {r.partition: r for r in received}
+    assert set(by_partition) == {0, 1}
+    assert by_partition[0].offset == 0
+    assert by_partition[1].offset == 0
+    for record in received:
+        assert record.topic == topic
+        assert json.loads(record.value) in [{"seq": 1}, {"seq": 2}]
+
+
+async def test_record_handler_exception_leaves_offset_uncommitted_then_advances(
+    bootstrap_servers,
+):
+    topic = "record-handler-error-topic"
+    await raw_produce(bootstrap_servers, topic, {"seq": 1, "fail": True})
+    await raw_produce(bootstrap_servers, topic, {"seq": 2, "fail": False})
+
+    handled: list[KafkaRecord] = []
+    processed: list[KafkaRecord] = []
+
+    class SpyPolicy:
+        async def handle(self, message, exc) -> None:
+            handled.append(message)
+
+    async def record_handler(record: KafkaRecord) -> None:
+        value = json.loads(record.value)
+        if value["fail"]:
+            raise ValueError("handler exploded")
+        processed.append(record)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="record-handler-error-group",
+        topics=[topic],
+        record_handler=record_handler,
+        error_policy=SpyPolicy(),
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(processed) == 1 and len(handled) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert len(processed) == 1
+    assert processed[0].offset == 1
+    assert len(handled) == 1
+    assert handled[0].offset == 0
+
+
+async def test_record_handler_sees_raw_bytes_for_malformed_json(bootstrap_servers):
+    topic = "record-handler-malformed-topic"
+    raw_producer = AIOKafkaProducer(bootstrap_servers=bootstrap_servers)
+    await raw_producer.start()
+    try:
+        await raw_producer.send_and_wait(topic, value=b"not valid json")
+    finally:
+        await raw_producer.stop()
+
+    seen: list[KafkaRecord] = []
+    decode_errors: list[Exception] = []
+
+    async def record_handler(record: KafkaRecord) -> None:
+        seen.append(record)
+        try:
+            json.loads(record.value)
+        except Exception as exc:
+            decode_errors.append(exc)
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="record-handler-malformed-group",
+        topics=[topic],
+        record_handler=record_handler,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(seen) == 1:
+                break
+            await asyncio.sleep(0.2)
+    finally:
+        await component.shutdown()
+
+    assert len(seen) == 1
+    assert seen[0].topic == topic
+    assert seen[0].partition == 0
+    assert seen[0].offset == 0
+    assert seen[0].value == b"not valid json"
+    assert len(decode_errors) == 1
