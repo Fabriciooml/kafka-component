@@ -165,13 +165,25 @@ always runs for any partition with no committed offset).
 
 - Bad construction (`handler`/`record_handler` both or neither) → `ValueError`
   raised synchronously from `__init__`.
-- `StartOffsetOutOfRangeError` raised inside the rebalance listener propagates
-  out of the next `getone()` call, which is not caught by the handler-failure
-  `try/except` in `_consume_loop` — it falls to the loop's outer `except`,
-  the same fatal path used today for deserialization failures in legacy mode:
-  `last_error` is set, `connected` becomes `False`, the loop exits, and
-  `shutdown()` remains safe to call. The component does not retry or
-  crash-loop, consistent with its documented "not a supervisor" stance.
+- `StartOffsetOutOfRangeError` raised inside the rebalance listener does
+  **not** propagate out of `aiokafka`'s coordinator on its own: the installed
+  `aiokafka==0.14.0`'s `_on_join_complete` (`group_coordinator.py`) wraps the
+  listener call in its own `try/except Exception: log.exception(...)` and
+  never touches the `_pending_exception`/`check_errors()` mechanism
+  `getone()` consults — confirmed during Task 5's implementation, correcting
+  this section's original (incorrect) claim that it propagated unassisted.
+  Instead, `_ResolverRebalanceListener` is given a one-arg `on_error`
+  callback (bound to `KafkaConsumerComponent._record_resolver_error`, which
+  sets `self._resolver_error`) that it calls immediately before re-raising.
+  `_consume_loop` checks `self._resolver_error` at the top of its `while`
+  loop, inside the outer `try:`, and re-raises it there if set — reaching
+  the loop's existing outer `except`, the same fatal path used today for
+  deserialization failures in legacy mode: `last_error` is set, `connected`
+  becomes `False`, the loop exits, and `shutdown()` remains safe to call.
+  The listener still raises too (not just calling `on_error`), so
+  `aiokafka`'s own `log.exception` diagnostic is preserved. The component
+  does not retry or crash-loop, consistent with its documented "not a
+  supervisor" stance.
 - All other failure handling (handler exception → `ErrorPolicy.handle`,
   policy exception → logged via `last_error`, offset not committed) is
   unchanged in both handler modes.
