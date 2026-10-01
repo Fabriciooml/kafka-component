@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from kafka_component.consumer import KafkaConsumerComponent, KafkaRecord, PartitionAssignment
+from kafka_component.consumer import (
+    KafkaConsumerComponent,
+    KafkaRecord,
+    PartitionAssignment,
+)
 
 
 def test_kafka_record_fields():
