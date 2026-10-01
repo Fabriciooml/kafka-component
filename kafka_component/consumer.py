@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer
@@ -11,6 +12,25 @@ from python_components import Component
 
 from kafka_component._routes import build_health_router
 from kafka_component.errors import ErrorPolicy, SkipAndLogPolicy
+
+
+@dataclass(frozen=True)
+class KafkaRecord:
+    topic: str
+    partition: int
+    offset: int
+    value: bytes
+    key: bytes | None = None
+    timestamp: int | None = None
+    headers: tuple[tuple[str, bytes], ...] = ()
+
+
+@dataclass(frozen=True)
+class PartitionAssignment:
+    topic: str
+    partition: int
+    beginning_offset: int
+    end_offset: int
 
 
 class KafkaConsumerComponent(Component):

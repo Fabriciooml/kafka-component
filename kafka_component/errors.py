@@ -6,6 +6,28 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 
+class StartOffsetOutOfRangeError(Exception):
+    def __init__(
+        self,
+        *,
+        topic: str,
+        partition: int,
+        requested_offset: int,
+        beginning_offset: int,
+        end_offset: int,
+    ) -> None:
+        self.topic = topic
+        self.partition = partition
+        self.requested_offset = requested_offset
+        self.beginning_offset = beginning_offset
+        self.end_offset = end_offset
+        super().__init__(
+            f"start_offset_resolver returned offset {requested_offset} for "
+            f"topic={topic} partition={partition}, outside valid range "
+            f"[{beginning_offset}, {end_offset}]"
+        )
+
+
 class Sender(Protocol):
     async def send(
         self, topic: str, value: Any, *, key: bytes | None = None
