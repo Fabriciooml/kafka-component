@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import Any
 
-from aiokafka import AIOKafkaProducer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 
 from kafka_component.consumer import (
     KafkaConsumerComponent,
@@ -263,7 +263,7 @@ async def test_record_handler_receives_coordinates_across_partitions(bootstrap_s
         assert json.loads(record.value) in [{"seq": 1}, {"seq": 2}]
 
 
-async def test_record_handler_exception_leaves_offset_uncommitted_then_advances(
+async def test_record_handler_exception_invokes_policy_then_advances_past_it(
     bootstrap_servers,
 ):
     topic = "record-handler-error-topic"
@@ -465,6 +465,56 @@ async def test_out_of_range_resolver_offset_is_fatal(bootstrap_servers):
     assert status["last_error"] is not None
 
     await asyncio.wait_for(component.shutdown(), timeout=5.0)
+
+    probe = AIOKafkaConsumer(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-out-of-range-group",  # same group as the component above
+    )
+    await probe.start()
+    try:
+        committed = await probe.committed(TopicPartition(topic, 0))
+    finally:
+        await probe.stop()
+    assert committed is None
+
+
+async def test_resolver_skips_earlier_records_despite_resolver_latency(
+    bootstrap_servers,
+):
+    topic = "resolver-latency-topic"
+    for i in range(5):
+        await raw_produce(bootstrap_servers, topic, {"seq": i})
+
+    received: list[KafkaRecord] = []
+
+    async def record_handler(record: KafkaRecord) -> None:
+        received.append(record)
+
+    async def slow_resolver(assignment: PartitionAssignment) -> int:
+        await asyncio.sleep(1.0)
+        return assignment.end_offset - 1  # skip all but the last record
+
+    component = KafkaConsumerComponent(
+        bootstrap_servers=bootstrap_servers,
+        group_id="resolver-latency-group",
+        topics=[topic],
+        record_handler=record_handler,
+        start_offset_resolver=slow_resolver,
+    )
+    await component.start()
+    try:
+        for _ in range(50):
+            if len(received) >= 1:
+                break
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(
+            0.5
+        )  # give any erroneous early delivery a chance to show up
+    finally:
+        await component.shutdown()
+
+    assert len(received) == 1
+    assert json.loads(received[0].value) == {"seq": 4}
 
 
 async def test_restart_resumes_from_committed_offset_without_invoking_resolver(

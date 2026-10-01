@@ -97,11 +97,11 @@ def test_accepts_record_handler_with_resolver():
         topics=["t"],
         record_handler=_noop_record_handler,
         start_offset_resolver=resolver,
-        auto_offset_reset="none",
+        auto_offset_reset="latest",
     )
     assert component._record_handler is _noop_record_handler
     assert component._start_offset_resolver is resolver
-    assert component._auto_offset_reset == "none"
+    assert component._auto_offset_reset == "latest"
 
 
 def test_resolver_allowed_with_legacy_handler():
@@ -127,3 +127,18 @@ def test_auto_offset_reset_defaults_to_earliest():
         handler=_noop_handler,
     )
     assert component._auto_offset_reset == "earliest"
+
+
+def test_rejects_none_auto_offset_reset_with_resolver():
+    async def resolver(assignment):
+        return 0
+
+    with pytest.raises(ValueError, match="none"):
+        KafkaConsumerComponent(
+            bootstrap_servers="localhost:9092",
+            group_id="g",
+            topics=["t"],
+            handler=_noop_handler,
+            start_offset_resolver=resolver,
+            auto_offset_reset="none",
+        )

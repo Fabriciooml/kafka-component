@@ -23,7 +23,7 @@ class KafkaRecord:
     topic: str
     partition: int
     offset: int
-    value: bytes
+    value: bytes | None
     key: bytes | None = None
     timestamp: int | None = None
     headers: tuple[tuple[str, bytes], ...] = ()
@@ -52,9 +52,14 @@ class _ResolverRebalanceListener(ConsumerRebalanceListener):
         pass
 
     async def on_partitions_assigned(self, assigned: Any) -> None:
+        assigned = list(assigned)
+        if not assigned:
+            return
+        self._consumer.pause(*assigned)
         for tp in assigned:
             committed = await self._consumer.committed(tp)
             if committed is not None:
+                self._consumer.resume(tp)
                 continue
             beginning = (await self._consumer.beginning_offsets([tp]))[tp]
             end = (await self._consumer.end_offsets([tp]))[tp]
@@ -76,6 +81,7 @@ class _ResolverRebalanceListener(ConsumerRebalanceListener):
                 self._on_error(exc)
                 raise exc
             self._consumer.seek(tp, target)
+            self._consumer.resume(tp)
 
 
 class KafkaConsumerComponent(Component):
@@ -97,6 +103,18 @@ class KafkaConsumerComponent(Component):
             raise ValueError(
                 "KafkaConsumerComponent requires exactly one of `handler` or "
                 "`record_handler`"
+            )
+        if auto_offset_reset == "none" and start_offset_resolver is not None:
+            raise ValueError(
+                "auto_offset_reset='none' cannot be combined with "
+                "start_offset_resolver: aiokafka establishes each "
+                "partition's initial position (raising "
+                "NoOffsetForPartitionError under 'none' when there is no "
+                "committed offset) before the resolver's seek() can run, "
+                "independent of pause state, so this combination can never "
+                "work. The resolver already runs for every partition with "
+                "no committed offset regardless of auto_offset_reset — use "
+                "the default 'earliest' (or 'latest') instead."
             )
         self.using([])
         self._bootstrap_servers = bootstrap_servers
@@ -158,6 +176,11 @@ class KafkaConsumerComponent(Component):
         while not self._stopping.is_set():
             try:
                 if self._resolver_error is not None:
+                    # aiokafka's coordinator swallows exceptions raised from
+                    # on_partitions_assigned (logs and continues) rather than
+                    # propagating them to getone() — so the listener records
+                    # the error via _record_resolver_error and we re-raise it
+                    # here ourselves to reach the fatal path below.
                     raise self._resolver_error
 
                 try:
