@@ -4,7 +4,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from kafka_component.errors import DeadLetterPolicy, SkipAndLogPolicy
+from kafka_component.errors import (
+    DeadLetterPolicy,
+    SkipAndLogPolicy,
+    StartOffsetOutOfRangeError,
+)
 
 
 @dataclass
@@ -66,3 +70,21 @@ async def test_dead_letter_policy_defaults_topic_from_original():
 
     topic, _ = sender.sent[0]
     assert topic == "orders.DLQ"
+
+
+def test_start_offset_out_of_range_error_carries_coordinates():
+    exc = StartOffsetOutOfRangeError(
+        topic="orders",
+        partition=1,
+        requested_offset=42,
+        beginning_offset=50,
+        end_offset=100,
+    )
+
+    assert exc.topic == "orders"
+    assert exc.partition == 1
+    assert exc.requested_offset == 42
+    assert exc.beginning_offset == 50
+    assert exc.end_offset == 100
+    assert "orders" in str(exc)
+    assert "42" in str(exc)

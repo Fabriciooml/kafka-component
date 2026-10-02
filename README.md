@@ -57,6 +57,50 @@ direct reference to the `producer` instance.
 - **JSON value-only.** Message values are `json.dumps`/`json.loads`. Keys and headers pass through untouched.
 - **Graceful shutdown drains the in-flight message.** `shutdown()` waits for the currently-processing message's handler (and its `ErrorPolicy`, if it fails) to finish before stopping — it does not abandon work mid-message.
 
+## Record handler mode and start-offset resolution
+
+For applications that need Kafka coordinates alongside the value (to record a
+durable failure, for example) or need to seek a partition to a specific
+offset the first time it's assigned, pass `record_handler` instead of
+`handler`, optionally with `start_offset_resolver`:
+
+```python
+from kafka_component import KafkaConsumerComponent, KafkaRecord, PartitionAssignment
+
+async def handle_record(record: KafkaRecord) -> None:
+    print(record.topic, record.partition, record.offset, record.value)
+
+async def resolve_start_offset(assignment: PartitionAssignment) -> int:
+    # Called only when this consumer group has no committed offset yet
+    # for this partition.
+    return assignment.end_offset  # e.g. "only records from now on"
+
+consumer = KafkaConsumerComponent(
+    bootstrap_servers="localhost:9092",
+    group_id="orders-service",
+    topics=["orders"],
+    record_handler=handle_record,
+    start_offset_resolver=resolve_start_offset,
+)
+```
+
+- Exactly one of `handler` or `record_handler` must be supplied; passing both
+  or neither raises `ValueError`.
+- `record_handler` receives raw, undecoded `value: bytes` — decoding and
+  handling decode failures (with `record.topic`/`record.partition`/`record.offset`
+  still available) is the application's responsibility.
+- `start_offset_resolver` runs once per partition, only when the consumer
+  group has no committed offset for it yet — on first assignment, and again
+  on a later rebalance if a genuinely new partition shows up. A partition
+  with a committed offset is never rewound to the resolver's answer.
+- A resolver result outside `[beginning_offset, end_offset]` raises
+  `StartOffsetOutOfRangeError`, which surfaces the same way other fatal
+  consumer errors do: `get_status()` reports `connected: False` with
+  `last_error` set.
+- `auto_offset_reset` (`"earliest"` / `"latest"` / `"none"`, default
+  `"earliest"`) is forwarded to the underlying `AIOKafkaConsumer` and applies
+  to any partition the resolver doesn't act on.
+
 ## Development
 
 ```bash
